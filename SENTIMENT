@@ -1,0 +1,137 @@
+import yfinance as yf
+import streamlit as st
+from datetime import datetime, timedelta
+from textblob import TextBlob
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.impute import SimpleImputer
+import numpy as np
+import pandas as pd
+
+# Set Streamlit page to wide mode
+st.set_page_config(layout="wide")
+
+def get_stock_data(symbol, days_before_launch):
+    # Get historical stock data
+    end_date = datetime.now().strftime('%Y-%m-%d')
+    start_date = (datetime.now() - timedelta(days=days_before_launch)).strftime('%Y-%m-%d')
+    stock_data = yf.download(symbol, start=start_date, end=end_date)
+
+    # Calculate sentiment score for each day
+    stock_data['Sentiment Score'] = stock_data['Close'].apply(get_sentiment_score)
+
+    # Generate additional features
+    stock_data['Price_Difference'] = stock_data['Close'].diff()
+    stock_data['Price_Increase'] = stock_data['Price_Difference'].apply(lambda x: 1 if x > 0 else 0)
+
+    # Prepare data for modeling
+    features = stock_data[['Sentiment Score', 'Price_Difference']]
+    target = stock_data['Price_Increase']
+
+    # Perform imputation to handle missing values
+    imputer = SimpleImputer(strategy='mean')
+    features = imputer.fit_transform(features)
+
+    # Check if there is variation in the target variable
+    unique_classes = np.unique(target)
+    if len(unique_classes) < 2:
+        st.write('Insufficient data for prediction. Only one class found.')
+        return None, None
+
+    # Split data into train and test sets
+    X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.2, random_state=42)
+
+    # Train a logistic regression model
+    model = LogisticRegression()
+    model.fit(X_train, y_train)
+
+    # Make predictions on the test set
+    y_pred = model.predict(X_test)
+
+    # Calculate accuracy score
+    accuracy = accuracy_score(y_test, y_pred)
+
+    return model, accuracy, stock_data
+
+def get_sentiment_score(close_price):
+    # Perform sentiment analysis on the close price
+    text = f"The stock's closing price is {close_price:.2f}."
+    blob = TextBlob(text)
+    sentiment_score = blob.sentiment.polarity
+
+    return sentiment_score
+
+def get_expected_percentage_increase(data, days):
+    expected_percentage_increase = []
+    for i in range(len(days)):
+        if i + days[i] < len(data):
+            today_close = data['Close'].iloc[i]
+            future_close = data['Close'].iloc[i + days[i]]
+            percentage_increase = (future_close - today_close) / today_close * 100
+            expected_percentage_increase.append(percentage_increase)
+        else:
+            expected_percentage_increase.append(0.0)
+    return expected_percentage_increase
+
+def get_fibonacci_levels(new_price, high_price, low_price):
+    price_range = high_price - low_price
+    fib_levels = [0.236, 0.382, 0.5, 0.618, 0.786]
+    support_levels = [new_price - fib * price_range for fib in fib_levels]
+    resistance_levels = [new_price + fib * price_range for fib in fib_levels]
+    return support_levels, resistance_levels
+
+def create_prediction_table(predictions, expected_percentage_increase, days, stock_data):
+    data = []
+    for i in range(len(predictions)):
+        if predictions[i] == 1:
+            date = (datetime.now() + timedelta(days=days[i])).strftime('%Y-%m-%d')
+            today_close = stock_data['Close'].iloc[-1]
+            expected_change = expected_percentage_increase[i]
+            new_price = today_close * (1 + expected_change / 100)
+            high_price = stock_data['High'].iloc[-1]
+            low_price = stock_data['Low'].iloc[-1]
+            support_levels, resistance_levels = get_fibonacci_levels(new_price, high_price, low_price)
+
+            row = [
+                date,
+                f"{expected_change:.2f}%",
+                f"{new_price:.2f}",
+                f"{support_levels[0]:.2f}/{resistance_levels[0]:.2f}",
+                f"{support_levels[1]:.2f}/{resistance_levels[1]:.2f}",
+                f"{support_levels[2]:.2f}/{resistance_levels[2]:.2f}"
+            ]
+            data.append(row)
+        else:
+            date = (datetime.now() + timedelta(days=days[i])).strftime('%Y-%m-%d')
+            row = [date, "No Increase", "-", "-", "-", "-"]
+            data.append(row)
+
+    columns = ["Date", "Percentage Change", "New Price", "Support 1 / Resistance 1", "Support 2 / Resistance 2",
+               "Support 3 / Resistance 3"]
+    df = pd.DataFrame(data, columns=columns)
+    return df
+
+# Streamlit web application
+st.title('Stock Price Increase Predictor')
+
+symbol = st.text_input('Enter stock symbol (e.g., AAPL):')
+days_before_launch = st.slider('Number of days before launch:', 9, 100, 14)
+
+if st.button('Predict Price Increase'):
+    with st.spinner('Loading data...'):
+        model, accuracy, stock_data = get_stock_data(symbol, days_before_launch)
+    if model is not None and accuracy is not None:
+        st.subheader(f'Model Accuracy: {accuracy:.2f}%')
+
+        days = [0, 1, 2, 3, 4, 5, 6 ,7 ,8 ,9 ,10, 11]  # Days for prediction
+        features = [[0.5, 10]] * len(days)  # Example features for demonstration, replace with appropriate features
+        predictions = model.predict(features)
+        expected_percentage_increase = get_expected_percentage_increase(stock_data, days)
+
+        # Create the prediction table
+        prediction_table = create_prediction_table(predictions, expected_percentage_increase, days, stock_data)
+
+        # Display the prediction table
+        st.subheader('Prediction Results')
+        st.table(prediction_table)
